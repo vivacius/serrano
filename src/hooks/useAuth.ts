@@ -15,13 +15,13 @@ async function fetchRole(userId: string): Promise<UserRole> {
       .from('profiles')
       .select('rol')
       .eq('id', userId)
-      .single();
+      .maybeSingle();
     if (data?.rol) {
       return data.rol as UserRole;
     }
-    return 'admin';
+    return 'comisionista';
   } catch {
-    return 'admin';
+    return 'comisionista';
   }
 }
 

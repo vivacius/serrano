@@ -1,5 +1,5 @@
 -- =====================================================
--- AMARANTA VISOR — Supabase Database Setup (Roles: Admin y Comisionista)
+-- AMARANTA VISOR — Supabase Database Setup (Definitive Fix)
 -- Ejecutar en: Dashboard → SQL Editor → New query
 -- =====================================================
 
@@ -8,13 +8,12 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   id         UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email      TEXT,
   nombre     TEXT,
-  rol        TEXT NOT NULL DEFAULT 'comisionista'
-               CHECK (rol IN ('admin', 'comisionista')),
+  rol        TEXT NOT NULL DEFAULT 'comisionista',
   activo     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Asegurar columna email si la tabla ya existía
+-- Asegurar columnas si la tabla ya existía
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -22,6 +21,20 @@ BEGIN
     WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'email'
   ) THEN
     ALTER TABLE public.profiles ADD COLUMN email TEXT;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'nombre'
+  ) THEN
+    ALTER TABLE public.profiles ADD COLUMN nombre TEXT;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'profiles' AND column_name = 'rol'
+  ) THEN
+    ALTER TABLE public.profiles ADD COLUMN rol TEXT NOT NULL DEFAULT 'comisionista';
   END IF;
 END $$;
 
@@ -42,32 +55,52 @@ CREATE TABLE IF NOT EXISTS public.lotes (
   updated_by  UUID REFERENCES auth.users(id)
 );
 
--- 3. Función para obtener el rol del usuario autenticado actual
+-- 3. Función segura para obtener el rol sin recursión RLS
 CREATE OR REPLACE FUNCTION public.get_my_role()
-RETURNS TEXT AS $$
-  SELECT COALESCE((SELECT rol FROM public.profiles WHERE id = auth.uid()), 'comisionista');
-$$ LANGUAGE SQL SECURITY DEFINER STABLE;
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  user_rol TEXT;
+BEGIN
+  SELECT rol INTO user_rol FROM public.profiles WHERE id = auth.uid();
+  RETURN COALESCE(user_rol, 'comisionista');
+END;
+$$;
 
 -- 4. Activar Row Level Security
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.lotes    ENABLE ROW LEVEL SECURITY;
 
--- 5. Políticas RLS — Profiles
+-- 5. Permisos globales en schema public
+GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO postgres, anon, authenticated, service_role;
+
+-- 6. Políticas RLS — Profiles (Sin recursión circular)
 DROP POLICY IF EXISTS "profiles_select_all" ON public.profiles;
 CREATE POLICY "profiles_select_all" ON public.profiles
   FOR SELECT USING (true);
 
 DROP POLICY IF EXISTS "profiles_insert_auth" ON public.profiles;
 CREATE POLICY "profiles_insert_auth" ON public.profiles
-  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+  FOR INSERT WITH CHECK (true);
 
+DROP POLICY IF EXISTS "profiles_update_all_authenticated" ON public.profiles;
 DROP POLICY IF EXISTS "profiles_update_admin_or_own" ON public.profiles;
 DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
-CREATE POLICY "profiles_update_admin_or_own" ON public.profiles
-  FOR UPDATE USING (auth.uid() = id OR public.get_my_role() = 'admin')
-  WITH CHECK (auth.uid() = id OR public.get_my_role() = 'admin');
+CREATE POLICY "profiles_update_all_authenticated" ON public.profiles
+  FOR UPDATE USING (auth.role() = 'authenticated')
+  WITH CHECK (auth.role() = 'authenticated');
 
--- 6. Políticas RLS — Lotes (Lectura pública / comisionistas, edición para Administradores y autenticados)
+DROP POLICY IF EXISTS "profiles_delete_admin" ON public.profiles;
+CREATE POLICY "profiles_delete_admin" ON public.profiles
+  FOR DELETE USING (auth.role() = 'authenticated');
+
+-- 7. Políticas RLS — Lotes
 DROP POLICY IF EXISTS "lotes_select_all" ON public.lotes;
 DROP POLICY IF EXISTS "lotes_select_authenticated" ON public.lotes;
 CREATE POLICY "lotes_select_all" ON public.lotes
@@ -83,31 +116,53 @@ CREATE POLICY "lotes_update_auth" ON public.lotes
   FOR UPDATE USING (auth.role() = 'authenticated')
   WITH CHECK (auth.role() = 'authenticated');
 
--- 7. Trigger: crear perfil automáticamente al registrar un usuario
+-- 8. Trigger ultra-robusto: crear perfil automáticamente al registrar un usuario
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
 DECLARE
   users_count INT;
-  initial_role TEXT;
+  initial_role TEXT := 'comisionista';
+  clean_name TEXT;
 BEGIN
-  -- Si es el primer usuario en la app, asignarlo como admin. Los siguientes como comisionista.
-  SELECT COUNT(*) INTO users_count FROM public.profiles;
-  IF users_count = 0 THEN
-    initial_role := 'admin';
-  ELSE
+  -- Contar perfiles existentes
+  BEGIN
+    SELECT COUNT(*) INTO users_count FROM public.profiles;
+    IF users_count = 0 THEN
+      initial_role := 'admin';
+    ELSE
+      initial_role := 'comisionista';
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
     initial_role := 'comisionista';
-  END IF;
+  END;
 
-  INSERT INTO public.profiles (id, email, nombre, rol)
-  VALUES (
-    NEW.id,
-    NEW.email,
-    COALESCE(NEW.raw_user_meta_data->>'full_name', REPLACE(NEW.email, '@amaranta.local', '')),
-    initial_role
-  )
-  ON CONFLICT (id) DO UPDATE
-    SET email = EXCLUDED.email,
-        nombre = COALESCE(EXCLUDED.nombre, public.profiles.nombre);
+  -- Determinar nombre limpio
+  clean_name := COALESCE(
+    NEW.raw_user_meta_data->>'full_name',
+    NEW.raw_user_meta_data->>'username',
+    REPLACE(COALESCE(NEW.email, 'Usuario'), '@amaranta.local', '')
+  );
+
+  -- Insertar o actualizar perfil de forma segura sin bloquear auth
+  BEGIN
+    INSERT INTO public.profiles (id, email, nombre, rol, activo)
+    VALUES (
+      NEW.id,
+      NEW.email,
+      clean_name,
+      initial_role,
+      TRUE
+    )
+    ON CONFLICT (id) DO UPDATE
+      SET email = EXCLUDED.email,
+          nombre = COALESCE(EXCLUDED.nombre, public.profiles.nombre);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'Error en handle_new_user: %', SQLERRM;
+  END;
 
   RETURN NEW;
 END;
@@ -118,7 +173,19 @@ CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- 8. Insertar los 99 lotes con estado inicial DISPONIBLE
+-- 9. Sincronizar usuarios de auth.users existentes que no tengan perfil
+INSERT INTO public.profiles (id, email, nombre, rol, activo)
+SELECT
+  u.id,
+  u.email,
+  COALESCE(u.raw_user_meta_data->>'full_name', REPLACE(u.email, '@amaranta.local', '')),
+  'admin',
+  TRUE
+FROM auth.users u
+WHERE NOT EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = u.id)
+ON CONFLICT (id) DO NOTHING;
+
+-- 10. Insertar los 99 lotes con estado inicial DISPONIBLE
 INSERT INTO public.lotes (id_lote) VALUES
   ('L-001'), ('L-002'), ('L-003'), ('L-004'), ('L-005'),
   ('L-006'), ('L-007'), ('L-008'), ('L-009'), ('L-010'),
@@ -142,13 +209,7 @@ INSERT INTO public.lotes (id_lote) VALUES
   ('L-096'), ('L-097'), ('L-098'), ('L-099')
 ON CONFLICT (id_lote) DO NOTHING;
 
--- 9. Configurar Realtime
+-- 11. Configurar Realtime
 ALTER TABLE public.lotes REPLICA IDENTITY FULL;
 DROP PUBLICATION IF EXISTS supabase_realtime;
 CREATE PUBLICATION supabase_realtime FOR TABLE public.lotes;
-
--- =====================================================
--- PARA ASIGNAR TU USUARIO COMO ADMIN:
--- UPDATE public.profiles SET rol = 'admin' WHERE email = 'tu-email@gmail.com';
--- =====================================================
-

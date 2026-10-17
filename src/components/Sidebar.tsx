@@ -126,7 +126,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="sidebar-section">
           <p className="sidebar-section-title">Capas</p>
           <div className="layer-toggle">
-            <label htmlFor="toggle-labels">🔢 Números de lote</label>
+            <label htmlFor="toggle-labels">🔢 Números y metros (m²)</label>
             <label className="toggle-switch">
               <input
                 id="toggle-labels"

@@ -67,12 +67,8 @@ function buildPopupContent(
 
     <div class="lote-popup-body">
       <div class="lote-popup-row">
-        <span class="lote-popup-label">📐 Área plano:</span>
+        <span class="lote-popup-label">📐 Área:</span>
         <span class="lote-popup-val"><strong>${props.area_plano.toLocaleString()} m²</strong></span>
-      </div>
-      <div class="lote-popup-row">
-        <span class="lote-popup-label">📏 Área real:</span>
-        <span class="lote-popup-val">${props.area_geom.toFixed(1)} m²</span>
       </div>
       <div class="lote-popup-row">
         <span class="lote-popup-label">👤 Dueño:</span>
@@ -298,19 +294,22 @@ const MapContent: React.FC<MapContentProps> = ({
     });
   }, [lotes, activeFilter]);
 
-  // ── 4. Lot number labels (Created ONCE, toggled instantly) ─
+  // ── 4. Lot number & area labels (Created ONCE, toggled instantly) ─
   useEffect(() => {
     const grp = L.layerGroup();
     typedGeoData.features.forEach((f: Feature) => {
       const id = f.properties?.id_lote;
       const center = id ? LOTE_CENTERS[id] : null;
       if (center) {
+        const area = f.properties?.area_plano;
+        const areaFormatted = area != null ? `${Math.round(area)} m²` : '';
+
         L.marker(center, {
           icon: L.divIcon({
             className:  'lote-label',
-            html:       `<span>${f.properties?.numero}</span>`,
-            iconSize:   [26, 16],
-            iconAnchor: [13, 8],
+            html:       `<div class="lote-label-box"><span class="lote-label-num">${f.properties?.numero}</span>${areaFormatted ? `<span class="lote-label-area">${areaFormatted}</span>` : ''}</div>`,
+            iconSize:   [38, 24],
+            iconAnchor: [19, 12],
           }),
           interactive: false,
           keyboard:    false,
